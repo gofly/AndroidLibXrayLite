@@ -16,16 +16,21 @@ import (
 
 	mobasset "golang.org/x/mobile/asset"
 
-	v2core "github.com/xtls/xray-core/core"
+	"github.com/2dust/AndroidLibXrayLite/core"
+	"github.com/2dust/AndroidLibXrayLite/proxy/v2ray"
+	"github.com/2dust/AndroidLibXrayLite/runner"
+	"github.com/songgao/water"
+
+	v2applog "github.com/xtls/xray-core/app/log"
+	v2commlog "github.com/xtls/xray-core/common/log"
 	v2net "github.com/xtls/xray-core/common/net"
 	v2filesystem "github.com/xtls/xray-core/common/platform/filesystem"
+	v2session "github.com/xtls/xray-core/common/session"
+	v2core "github.com/xtls/xray-core/core"
 	v2stats "github.com/xtls/xray-core/features/stats"
 	v2serial "github.com/xtls/xray-core/infra/conf/serial"
 	_ "github.com/xtls/xray-core/main/distro/all"
 	v2internet "github.com/xtls/xray-core/transport/internet"
-
-	v2applog "github.com/xtls/xray-core/app/log"
-	v2commlog "github.com/xtls/xray-core/common/log"
 )
 
 const (
@@ -44,6 +49,9 @@ type V2RayPoint struct {
 	closeChan chan struct{}
 
 	Vpoint    *v2core.Instance
+	tunDev    *water.Interface
+	lwipStack core.LWIPStack
+	lwipTask  *runner.Task
 	IsRunning bool
 
 	DomainName           string
@@ -58,6 +66,8 @@ type V2RayVPNServiceSupportsSet interface {
 	Shutdown() int
 	Protect(int) bool
 	OnEmitStatus(int, string) int
+	GetFd() int
+	Sniffing() bool
 }
 
 /*RunLoop Run V2Ray main loop
@@ -127,6 +137,53 @@ func (v *V2RayPoint) shutdownInit() {
 	v.Vpoint.Close()
 	v.Vpoint = nil
 	v.statsManager = nil
+
+	runner.CheckAndStop(v.lwipTask)
+	if v.lwipStack != nil {
+		log.Print("close lwip stack")
+		err := v.lwipStack.Close()
+		if err != nil {
+			log.Printf("close lwip stack error: %s", err)
+		}
+		v.lwipStack = nil
+	}
+
+	if v.tunDev != nil {
+		log.Print("close tun dev")
+		err := v.tunDev.Close()
+		if err != nil {
+			log.Printf("close tun dev error: %s", err)
+		}
+		v.tunDev = nil
+	}
+
+}
+
+// hack to receive tunfd
+func (v *V2RayPoint) openTunDevice(fd int) error {
+	file := os.NewFile(uintptr(fd), "tun") // dummy file path name since we already got the fd
+	v.tunDev = &water.Interface{
+		ReadWriteCloser: file,
+	}
+
+	v.lwipStack = core.NewLWIPStack()
+	v.lwipTask = runner.Go(func(shouldStop runner.S) error {
+		data := make([]byte, 4096)
+		for !shouldStop() {
+			n, err := v.tunDev.Read(data)
+			if err != nil {
+				log.Printf("read from tun error: %s", err)
+				continue
+			}
+			_, err = v.lwipStack.Write(data[:n])
+			if err != nil {
+				log.Printf("write to lwip error: %s", err)
+			}
+		}
+		return errors.New("nil")
+	})
+
+	return nil
 }
 
 func (v *V2RayPoint) pointloop() error {
@@ -146,6 +203,19 @@ func (v *V2RayPoint) pointloop() error {
 	}
 	v.statsManager = v.Vpoint.GetFeature(v2stats.ManagerType()).(v2stats.Manager)
 
+	ctx := v2session.ContextWithContent(context.Background(), &v2session.Content{
+		SniffingRequest: v2session.SniffingRequest{
+			Enabled:                        v.SupportSet.Sniffing(),
+			OverrideDestinationForProtocol: []string{"tls", "http"},
+			RouteOnly:                      true,
+		},
+	})
+	core.RegisterTCPConnHandler(v2ray.NewTCPHandler(ctx, v.Vpoint))
+	core.RegisterUDPConnHandler(v2ray.NewUDPHandler(ctx, v.Vpoint, 3*time.Minute))
+	core.RegisterOutputFn(func(data []byte) (int, error) {
+		return v.tunDev.Write(data)
+	})
+
 	log.Println("start core")
 	v.IsRunning = true
 	if err := v.Vpoint.Start(); err != nil {
@@ -157,6 +227,13 @@ func (v *V2RayPoint) pointloop() error {
 	v.SupportSet.Prepare()
 	v.SupportSet.Setup("")
 	v.SupportSet.OnEmitStatus(0, "Running")
+
+	if err := v.openTunDevice(v.SupportSet.GetFd()); err != nil {
+		v.IsRunning = false
+		log.Println(err)
+		return err
+	}
+
 	return nil
 }
 
@@ -244,7 +321,7 @@ func NewV2RayPoint(s V2RayVPNServiceSupportsSet, adns bool) *V2RayPoint {
 This func will return libv2ray binding version and V2Ray version used.
 */
 func CheckVersionX() string {
-	var version  = 24
+	var version = 24
 	return fmt.Sprintf("Lib v%d, Xray-core v%s", version, v2core.Version())
 }
 
