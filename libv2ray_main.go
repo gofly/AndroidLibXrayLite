@@ -237,7 +237,7 @@ func (v *V2RayPoint) pointloop() error {
 	return nil
 }
 
-func (v *V2RayPoint) MeasureDelay() (int64, error) {
+func (v *V2RayPoint) MeasureDelay(testURL string) (int64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 
 	go func() {
@@ -249,7 +249,7 @@ func (v *V2RayPoint) MeasureDelay() (int64, error) {
 		}
 	}()
 
-	return measureInstDelay(ctx, v.Vpoint)
+	return measureInstDelay(ctx, v.Vpoint, testURL)
 }
 
 // InitV2Env set v2 asset path
@@ -276,7 +276,7 @@ func TestConfig(ConfigureFileContent string) error {
 	return err
 }
 
-func MeasureOutboundDelay(ConfigureFileContent string) (int64, error) {
+func MeasureOutboundDelay(ConfigureFileContent, testURL string) (int64, error) {
 	config, err := v2serial.LoadJSONConfig(strings.NewReader(ConfigureFileContent))
 	if err != nil {
 		return -1, err
@@ -298,7 +298,7 @@ func MeasureOutboundDelay(ConfigureFileContent string) (int64, error) {
 		return -1, err
 	}
 
-	delay, err := measureInstDelay(context.Background(), inst)
+	delay, err := measureInstDelay(context.Background(), inst, testURL)
 	inst.Close()
 	return delay, err
 }
@@ -329,7 +329,7 @@ func CheckVersionX() string {
 	return fmt.Sprintf("Lib v%d, Xray-core v%s", version, v2core.Version())
 }
 
-func measureInstDelay(ctx context.Context, inst *v2core.Instance) (int64, error) {
+func measureInstDelay(ctx context.Context, inst *v2core.Instance, testURL string) (int64, error) {
 	if inst == nil {
 		return -1, errors.New("core instance nil")
 	}
@@ -351,7 +351,7 @@ func measureInstDelay(ctx context.Context, inst *v2core.Instance) (int64, error)
 		Timeout:   12 * time.Second,
 	}
 
-	req, _ := http.NewRequestWithContext(ctx, "GET", "http://www.google.com/generate_204", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", testURL, nil)
 	start := time.Now()
 	resp, err := c.Do(req)
 	if err != nil {
