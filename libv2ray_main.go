@@ -1,7 +1,9 @@
 package libv2ray
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -277,7 +279,18 @@ func TestConfig(ConfigureFileContent string) error {
 }
 
 func MeasureOutboundDelay(ConfigureFileContent, testURL string) (int64, error) {
-	config, err := v2serial.LoadJSONConfig(strings.NewReader(ConfigureFileContent))
+	configMap := make(map[string]interface{})
+	err := json.NewDecoder(strings.NewReader(ConfigureFileContent)).Decode(&configMap)
+	if err != nil {
+		return -1, err
+	}
+	delete(configMap, "stats")
+	delete(configMap, "policy")
+	configData, err := json.Marshal(configMap)
+	if err != nil {
+		return -1, err
+	}
+	config, err := v2serial.LoadJSONConfig(bytes.NewReader(configData))
 	if err != nil {
 		return -1, err
 	}
